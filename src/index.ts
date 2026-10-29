@@ -5,6 +5,7 @@ import { config } from 'dotenv';
 import { registerSpecTools } from './spec/register.js';
 import { loadToolSpecs } from './spec/loader.js';
 import { registerSessionTools } from './tools/session.tools.js';
+import { registerReorderTool } from './tools/reorder.tools.js';
 import { startKeepAlive } from './services/auth.service.js';
 import { browserService } from './services/browser.service.js';
 import { logger } from './utils/logger.js';
@@ -16,7 +17,13 @@ export function createServer(): { server: McpServer; toolCount: number } {
 
   registerSessionTools(server);
   const load = loadToolSpecs();
-  registerSpecTools(server, load);
+  const reg = registerSpecTools(server, load);
+
+  // Composite tool: reads history endpoints and writes the cart, so it follows
+  // the cart toolset whatever the history toolset says.
+  const reorder =
+    reg.selection.enabled.has('cart') &&
+    registerReorderTool(server, new Map(load.specs.map((s) => [s.name, s])));
 
   if (load.failures.length > 0) {
     for (const f of load.failures) {
@@ -25,11 +32,16 @@ export function createServer(): { server: McpServer; toolCount: number } {
   }
   logger.info('Tools registered', {
     declarative: load.specs.length,
+    exposed: reg.registered.length,
+    hidden: reg.hidden.length,
+    toolsets: [...reg.selection.enabled],
+    checkout: reg.selection.checkoutEnabled,
+    reorder: Boolean(reorder),
     failed: load.failures.length,
     dir: load.dir,
   });
 
-  return { server, toolCount: load.specs.length };
+  return { server, toolCount: reg.registered.length };
 }
 
 async function main(): Promise<void> {
