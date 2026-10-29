@@ -77,13 +77,33 @@ try {
   const noSchema = tools.filter((t) => !t.inputSchema || t.inputSchema.type !== 'object');
   if (noSchema.length) fail(`tools without a valid inputSchema: ${noSchema.map((t) => t.name).join(', ')}`);
 
+  // Safety defaults: nothing able to pay unless explicitly enabled, and every
+  // API tool tells the client whether it only reads.
+  const checkoutOn = ['1', 'true', 'yes', 'on'].includes(String(process.env.CARREFOUR_ENABLE_CHECKOUT ?? '').toLowerCase());
+  const pay = tools.find((t) => t.name === 'submit_checkout_payment');
+  if (!checkoutOn && pay) fail('submit_checkout_payment is exposed without CARREFOUR_ENABLE_CHECKOUT');
+  if (checkoutOn && pay && pay.annotations?.destructiveHint !== true) {
+    fail('submit_checkout_payment must be annotated destructiveHint: true');
+  }
+  const unannotated = api.filter((t) => typeof t.annotations?.readOnlyHint !== 'boolean');
+  if (unannotated.length) fail(`API tools without readOnlyHint: ${unannotated.map((t) => t.name).join(', ')}`);
+  const readOnly = api.filter((t) => t.annotations.readOnlyHint).length;
+  console.log(`annotations OK -> ${readOnly} read-only, ${api.length - readOnly} writing; checkout ${pay ? 'ON' : 'off'}`);
+
   // Calling an authenticated tool without a session must fail cleanly, not crash.
-  const called = await send(3, 'tools/call', {
-    name: 'get_delivery_timeslots',
-    arguments: { facilityServiceId: '0000-000-000' },
-  });
+  // Pick a tool that the current CARREFOUR_TOOLSETS actually exposes.
+  const probes = [
+    ['get_delivery_timeslots', { facilityServiceId: '0000-000-000' }],
+    ['get_orders', {}],
+    ['get_loyalty_balance', {}],
+    ['get_cart', {}],
+  ];
+  const probe = probes.find(([name]) => api.some((t) => t.name === name));
+  if (!probe) fail('no authenticated probe tool exposed with this toolset selection');
+  const called = await send(3, 'tools/call', { name: probe[0], arguments: probe[1] });
   if (called.error) fail(`tools/call crashed: ${JSON.stringify(called.error)}`);
-  console.log(`tools/call OK -> isError=${called.result.isError === true}`);
+  if (/not found/i.test(String(called.result.content?.[0]?.text))) fail(`${probe[0]} is listed but not callable`);
+  console.log(`tools/call OK (${probe[0]}) -> isError=${called.result.isError === true}`);
   console.log(`  first line: ${String(called.result.content[0].text).split('\n')[0]}`);
 
   console.log('\nAPI tools:');
