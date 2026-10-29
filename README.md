@@ -29,6 +29,7 @@ dropping in a JSON file — no code.
 - [Install](#install)
 - [Connect it to your agent](#connect-it-to-your-agent) — [Claude Code](#claude-code) · [Claude Desktop](#claude-desktop) · [Cursor, Windsurf, Zed, VS Code](#cursor-windsurf-zed-vs-code-and-other-mcp-clients)
 - [Log in](#log-in)
+- [Toolsets and safety](#toolsets-and-safety)
 - [Tool reference](#tool-reference)
 - [Why a real browser](#why-a-real-browser)
 - [How authentication works](#how-authentication-works)
@@ -174,6 +175,49 @@ a real call).
 The cookie jar lives in `<data dir>/sessions/cookies.json` (`0600`) and is
 re-injected into the browser profile on every start.
 
+## Toolsets and safety
+
+The server only exposes what you need, and nothing able to pay unless you ask
+for it.
+
+**Toolsets.** Every tool belongs to one toolset. Pick them with
+`CARREFOUR_TOOLSETS` (comma-separated, or `all`):
+
+| Toolset | Default | Contents |
+| --- | --- | --- |
+| `catalog` | on | search, product details, reviews, recommendations |
+| `cart` | on | read and fill the cart, promo codes, `carrefour_reorder` |
+| `stores` | on | drive stores, favourite store, slots |
+| `history` | on | orders, in-store receipts, frequent purchases |
+| `loyalty` | on | balance, cards, coupons, advantage codes |
+| `lists` | on | shopping lists |
+| `account` | on | consents |
+| `marketing` | off | banners, placements, site chat prompts, donations |
+| `checkout` | off | slot and summary validation, payment |
+
+Fewer tools means less context spent on every conversation and fewer wrong
+picks by the model. Example: `"env": {"CARREFOUR_TOOLSETS": "history,cart"}`.
+The classification lives in [`src/spec/catalog.ts`](src/spec/catalog.ts); a
+test fails if a JSON definition is added without an entry there.
+
+**Checkout is locked.** `validate_checkout_slot`, `validate_checkout_summary`
+and `submit_checkout_payment` are only exposed when
+`CARREFOUR_ENABLE_CHECKOUT=1`, even with `CARREFOUR_TOOLSETS=all`. Two
+switches on purpose: "all" should never quietly mean "able to pay".
+
+**Annotations.** Every tool carries MCP annotations (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`), so clients can run reads freely and ask
+before writes. The checkout tools are marked destructive. Several read-only
+endpoints are POSTs, so the annotations come from the catalog, not the HTTP
+method.
+
+**Compact responses.** Carrefour's payloads are built for drawing web pages:
+image sizes, tracking blocks, SEO fields, empty values. By default these are
+removed before the response reaches the model (business fields such as prices,
+quantities, EANs, statuses, dates and action links are kept), and a footer gives
+the before/after size. Pass `raw_response: true` to any tool for the untouched
+payload, or set `CARREFOUR_COMPACT=0` to turn this off globally.
+
 ## Tool reference
 
 ### Search & catalogue *(no account needed)*
@@ -242,6 +286,17 @@ re-injected into the browser profile on every start.
 | `get_shopping_lists` | GET /api/shopping-lists | — |
 | `get_shopping_list` | GET /api/shopping-lists-id/{list_id} | `list_id` |
 | `create_shopping_list` | POST /api/shopping-lists/memo-list | `title` |
+
+### Composite tools
+
+| Tool | What it does |
+| --- | --- |
+| `carrefour_reorder` | Puts the products of a past purchase back in the cart in one call. Source: an in-store receipt (`gln`, `date_key`, `receipt_number`), a drive/delivery order (`order_number`), or a list of EANs. Dry run by default: lists what it found. With `dry_run: false` it **sets** each quantity in the cart, in batches, then retries a failed batch item by item to report exactly which products could not be added. `exclude_eans` leaves products out. Reads the store from the current cart when `basketServiceId` / `subBasketType` are omitted. Never validates or pays. |
+
+> The captured definitions carry no response samples, so line items are found by
+> walking the payload for EAN-like fields with their quantity and label rather than
+> by a fixed shape. If an order's payload holds no product lines, the tool says so
+> and suggests the receipt or `get_frequent_purchases` route.
 
 ## Why a real browser
 
@@ -335,7 +390,8 @@ The engine (`src/spec/`):
   `multipart/form-data` (boundary left to `fetch`);
 - applies a **sliding rate limit** with jitter, plus browser headers.
 
-Adding an endpoint = dropping a new JSON file into `tools/`. No code to write.
+Adding an endpoint = dropping a new JSON file into `tools/`, plus one line in
+`src/spec/catalog.ts` to give it a toolset and say whether it reads or writes.
 
 ## Configuration
 
@@ -354,6 +410,9 @@ See `.env.example`. Main variables:
 | `CARREFOUR_OAUTH_SCOPE` | `openid iam` | requested scopes |
 | `CARREFOUR_TOOLS_DIR` | `<project>/tools` | JSON tool definitions directory |
 | `CARREFOUR_MAX_RESPONSE_CHARS` | `60000` | truncation of large responses |
+| `CARREFOUR_TOOLSETS` | all but `marketing`, `checkout` | toolsets to expose, comma-separated, or `all` |
+| `CARREFOUR_ENABLE_CHECKOUT` | off | `1` to expose the checkout and payment tools |
+| `CARREFOUR_COMPACT` | on | `0` to return raw Carrefour payloads by default |
 | `REQUEST_TIMEOUT_MS` | `30000` | HTTP timeout |
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_MS` | `10` / `60000` | rate-limit window |
 | `MIN_DELAY_MS` / `MAX_DELAY_MS` | `100` / `500` | jitter between requests |
@@ -371,8 +430,11 @@ npm run verify    # all three
 ```
 
 Tests cover `$param` substitution, URL segments, arrays in query strings, the
-three body encodings, and cookie-jar handling. The smoke test actually boots the
-server, performs the JSON-RPC handshake and lists the tools.
+three body encodings, cookie-jar handling, toolset selection and the checkout
+lock, annotations, compact rendering, and line-item extraction for
+`carrefour_reorder`. The smoke test actually boots the server, performs the
+JSON-RPC handshake, lists the tools and checks that no payment tool is exposed
+unless enabled. CI runs all of it on Linux, Windows and macOS with Node 20 and 22.
 
 > Network calls to carrefour.fr are **not** tested automatically — they need a
 > real account and valid cookies.
@@ -390,10 +452,11 @@ persisted, in `~/.carrefour-drive-mcp/sessions/cookies.json` with `0600`
 permissions. No credential
 lives in this repo, and `data/` and `.env` are gitignored.
 
-**Can it place a real order?** Yes — `submit_checkout_payment` charges a real
-payment. Treat it accordingly.
+**Can it place a real order?** Only if you set `CARREFOUR_ENABLE_CHECKOUT=1`.
+Then `submit_checkout_payment` charges a real payment: treat it accordingly.
 
-**Can I add endpoints?** Drop a JSON file in `tools/`. See
+**Can I add endpoints?** Drop a JSON file in `tools/` and classify it in
+`src/spec/catalog.ts` (toolset and read/write/checkout). See
 [How the executor works](#how-the-executor-works).
 
 **Which clients are supported?** Anything speaking MCP over stdio: Claude Code,
