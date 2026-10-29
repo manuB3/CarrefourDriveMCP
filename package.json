@@ -62,10 +62,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/maximeallanic/CarrefourDriveMCP.git"
+    "url": "git+https://github.com/manuB3/CarrefourDriveMCP.git"
   },
   "bugs": {
-    "url": "https://github.com/maximeallanic/CarrefourDriveMCP/issues"
+    "url": "https://github.com/manuB3/CarrefourDriveMCP/issues"
   },
-  "homepage": "https://github.com/maximeallanic/CarrefourDriveMCP#readme"
+  "homepage": "https://github.com/manuB3/CarrefourDriveMCP#readme"
 }

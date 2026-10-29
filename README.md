@@ -5,13 +5,22 @@ Model Context Protocol client search the French grocery catalogue, build a cart,
 pick a Drive pickup or delivery slot, read loyalty points and past receipts — on
 your own Carrefour account.
 
-**48 tools.** 43 real `carrefour.fr` API endpoints described as JSON and run by a
-generic executor, plus 5 session-management tools. Adding an endpoint means
-dropping in a JSON file — no code.
+> **About this fork.** Based on
+> [maximeallanic/CarrefourDriveMCP](https://github.com/maximeallanic/CarrefourDriveMCP),
+> with: toolsets you can switch on and off, the checkout and payment tools locked
+> unless explicitly enabled, MCP annotations on every tool, compact responses,
+> a `carrefour_reorder` tool, and CI on Linux, Windows and macOS. See
+> [Toolsets and safety](#toolsets-and-safety).
+
+**49 tools.** 43 real `carrefour.fr` API endpoints described as JSON and run by a
+generic executor, 5 session-management tools and one composite reorder tool.
+41 are exposed by default (marketing and checkout are off). Adding an endpoint
+means dropping in a JSON file and classifying it in one line.
 
 ```
 "What did I buy last month?"            → get_loyalty_order_receipts
 "Refill my usual weekly groceries."     → get_frequent_purchases + add_item_to_cart
+"Reorder what I bought last Saturday."  → get_loyalty_order_receipts + carrefour_reorder
 "Cheapest organic pasta under 2 €?"     → search_products
 "Book the Saturday morning Drive slot." → get_delivery_timeslots + select_cart_delivery_slot
 ```
@@ -46,7 +55,7 @@ Nothing to clone. Node.js **20+** is the only prerequisite (native `fetch`,
 `FormData`, `node:test`).
 
 ```sh
-npx -y github:maximeallanic/CarrefourDriveMCP
+npx -y github:manuB3/CarrefourDriveMCP
 ```
 
 That single command fetches, builds and starts the server on stdio — the first
@@ -57,7 +66,7 @@ never type it yourself: you put it in your MCP client config
 Prefer it installed once, globally?
 
 ```sh
-npm install -g github:maximeallanic/CarrefourDriveMCP
+npm install -g github:manuB3/CarrefourDriveMCP
 carrefour-drive-mcp
 ```
 
@@ -69,7 +78,7 @@ Override with `CARREFOUR_DATA_DIR`.
 <summary>From source instead</summary>
 
 ```sh
-git clone https://github.com/maximeallanic/CarrefourDriveMCP.git
+git clone https://github.com/manuB3/CarrefourDriveMCP.git
 cd CarrefourDriveMCP
 npm install     # builds, and downloads the Chromium transport
 node dist/index.js
@@ -84,7 +93,7 @@ A source checkout keeps its data in the repo's own `data/` directory.
 ### Claude Code
 
 ```sh
-claude mcp add carrefour-drive -- npx -y github:maximeallanic/CarrefourDriveMCP
+claude mcp add carrefour-drive -- npx -y github:manuB3/CarrefourDriveMCP
 ```
 
 Then, in any session:
@@ -107,7 +116,7 @@ Edit `claude_desktop_config.json`:
   "mcpServers": {
     "carrefour-drive": {
       "command": "npx",
-      "args": ["-y", "github:maximeallanic/CarrefourDriveMCP"]
+      "args": ["-y", "github:manuB3/CarrefourDriveMCP"]
     }
   }
 }
@@ -116,7 +125,7 @@ Edit `claude_desktop_config.json`:
 Restart Claude Desktop; the Carrefour tools appear in the tools menu.
 
 > On Windows, use `"command": "cmd"` with
-> `"args": ["/c", "npx", "-y", "github:maximeallanic/CarrefourDriveMCP"]`.
+> `"args": ["/c", "npx", "-y", "github:manuB3/CarrefourDriveMCP"]`.
 
 ### Cursor, Windsurf, Zed, VS Code and other MCP clients
 
@@ -125,7 +134,7 @@ Any client that speaks MCP over stdio takes the same two fields:
 ```json
 {
   "command": "npx",
-  "args": ["-y", "github:maximeallanic/CarrefourDriveMCP"]
+  "args": ["-y", "github:manuB3/CarrefourDriveMCP"]
 }
 ```
 
