@@ -19,7 +19,9 @@ FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify tini \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && printf '<!doctype html><meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;resize=scale">\n' \
+    > /usr/share/novnc/index.html
 
 WORKDIR /app
 COPY package.json package-lock.json ./
