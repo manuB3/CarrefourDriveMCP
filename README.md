@@ -12,7 +12,7 @@ your own Carrefour account.
 > a `carrefour_reorder` tool, and CI on Linux, Windows and macOS. See
 > [Toolsets and safety](#toolsets-and-safety).
 
-**49 tools.** 43 real `carrefour.fr` API endpoints described as JSON and run by a
+**49 tools, over stdio or HTTP.** 43 real `carrefour.fr` API endpoints described as JSON and run by a
 generic executor, 5 session-management tools and one composite reorder tool.
 41 are exposed by default (marketing and checkout are off). Adding an endpoint
 means dropping in a JSON file and classifying it in one line.
@@ -39,6 +39,7 @@ means dropping in a JSON file and classifying it in one line.
 - [Connect it to your agent](#connect-it-to-your-agent) — [Claude Code](#claude-code) · [Claude Desktop](#claude-desktop) · [Cursor, Windsurf, Zed, VS Code](#cursor-windsurf-zed-vs-code-and-other-mcp-clients)
 - [Log in](#log-in)
 - [Toolsets and safety](#toolsets-and-safety)
+- [Remote connector (phone, web)](#remote-connector-phone-web)
 - [Tool reference](#tool-reference)
 - [Why a real browser](#why-a-real-browser)
 - [How authentication works](#how-authentication-works)
@@ -183,6 +184,20 @@ a real call).
 
 The cookie jar lives in `<data dir>/sessions/cookies.json` (`0600`) and is
 re-injected into the browser profile on every start.
+
+## Remote connector (phone, web)
+
+Run the server in HTTP mode on an always-on machine and add it to Claude as a
+custom connector: it then works from Claude on the phone, the web and the
+desktop app. HTTP mode is protected by OAuth (Claude registers itself, you type
+a password once), and the Docker image adds a remote sign-in screen, because
+Carrefour's login needs a captcha and an emailed code at least once a day.
+
+```sh
+MCP_AUTH_PASSWORD='…' MCP_PUBLIC_URL=https://carrefour.example.com npx -y github:manuB3/CarrefourDriveMCP --http
+```
+
+Step-by-step guide with Docker, Synology and Cloudflare Tunnel: **[DEPLOY.md](DEPLOY.md)**.
 
 ## Toolsets and safety
 
