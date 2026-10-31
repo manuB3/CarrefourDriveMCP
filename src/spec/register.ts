@@ -138,7 +138,8 @@ export interface RegisterResult extends LoadResult {
 export function registerSpecTools(
   server: McpServer,
   load: LoadResult = loadToolSpecs(),
-  selection: ToolsetSelection = selectToolsets()
+  selection: ToolsetSelection = selectToolsets(),
+  opts: { quiet?: boolean } = {}
 ): RegisterResult {
   const registered: string[] = [];
   const hidden: string[] = [];
@@ -173,6 +174,8 @@ export function registerSpecTools(
     );
     registered.push(spec.name);
   }
+
+  if (opts.quiet) return { ...load, registered, hidden, selection };
 
   for (const failure of load.failures) {
     logger.error('Skipped tool definition', failure);

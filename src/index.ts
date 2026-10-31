@@ -1,57 +1,35 @@
 #!/usr/bin/env node
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { config } from 'dotenv';
-import { registerSpecTools } from './spec/register.js';
-import { loadToolSpecs } from './spec/loader.js';
-import { registerSessionTools } from './tools/session.tools.js';
-import { registerReorderTool } from './tools/reorder.tools.js';
+import { createServer } from './server.js';
 import { startKeepAlive } from './services/auth.service.js';
 import { browserService } from './services/browser.service.js';
 import { logger } from './utils/logger.js';
 
 config();
 
-export function createServer(): { server: McpServer; toolCount: number } {
-  const server = new McpServer({ name: 'carrefour-drive', version: '2.0.0' });
+export { createServer };
 
-  registerSessionTools(server);
-  const load = loadToolSpecs();
-  const reg = registerSpecTools(server, load);
-
-  // Composite tool: reads history endpoints and writes the cart, so it follows
-  // the cart toolset whatever the history toolset says.
-  const reorder =
-    reg.selection.enabled.has('cart') &&
-    registerReorderTool(server, new Map(load.specs.map((s) => [s.name, s])));
-
-  if (load.failures.length > 0) {
-    for (const f of load.failures) {
-      process.stderr.write(`[carrefour-drive] skipped ${f.file}: ${f.reason}\n`);
-    }
-  }
-  logger.info('Tools registered', {
-    declarative: load.specs.length,
-    exposed: reg.registered.length,
-    hidden: reg.hidden.length,
-    toolsets: [...reg.selection.enabled],
-    checkout: reg.selection.checkoutEnabled,
-    reorder: Boolean(reorder),
-    failed: load.failures.length,
-    dir: load.dir,
-  });
-
-  return { server, toolCount: reg.registered.length };
+/** `--http` or MCP_TRANSPORT=http: serve Streamable HTTP; otherwise stdio. */
+function wantsHttp(): boolean {
+  return process.argv.includes('--http') || (process.env.MCP_TRANSPORT ?? '').toLowerCase() === 'http';
 }
 
 async function main(): Promise<void> {
-  const { server, toolCount } = createServer();
+  if (wantsHttp()) {
+    // Imported lazily so the stdio path never loads express.
+    const { startHttpServer } = await import('./http/server.js');
+    await startHttpServer();
+  } else {
+    const { server, toolCount } = createServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    process.stderr.write(`[carrefour-drive] MCP server ready — ${toolCount} API tools loaded\n`);
+  }
+
   // The IAM SSO session dies after 60 min idle, which a long-running server
   // would otherwise hit between two user requests.
   startKeepAlive();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  process.stderr.write(`[carrefour-drive] MCP server ready — ${toolCount} API tools loaded\n`);
 
   // The browser is a child process; leaving it behind would lock the profile.
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
