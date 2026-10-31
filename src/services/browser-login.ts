@@ -69,6 +69,75 @@ function loggedIn(tabs: Array<{ type: string; url: string }>): boolean {
 }
 
 /**
+ * Command line of the sign-in browser.
+ *
+ * In a container there is no desktop: the window opens on a virtual X screen
+ * (Xvfb) that the user reaches through noVNC. There it must fill that screen,
+ * and Chromium cannot use its sandbox as root, which is how the image runs.
+ */
+export function loginBrowserArgs(dir: string, port: number, env: NodeJS.ProcessEnv = process.env): string[] {
+  const args = [
+    `--user-data-dir=${dir}`,
+    `--remote-debugging-port=${port}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+  ];
+  if (remoteLoginUrl(env)) {
+    const size = (env.CARREFOUR_LOGIN_WINDOW_SIZE || '1280,900').replace('x', ',');
+    args.push('--window-position=0,0', `--window-size=${size}`, '--lang=fr-FR');
+  }
+  if (['1', 'true', 'yes'].includes((env.CARREFOUR_CHROMIUM_NO_SANDBOX ?? '').toLowerCase())) {
+    args.push('--no-sandbox');
+  }
+  args.push(LOGIN_URL);
+  return args;
+}
+
+/**
+ * Where the user watches the sign-in window when the server runs headless
+ * (the noVNC page of the container). Unset on a desktop install.
+ */
+export function remoteLoginUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.CARREFOUR_REMOTE_LOGIN_URL?.trim() || undefined;
+}
+
+let loginInFlight: Promise<string> | null = null;
+let lastLoginResult: { at: number; message: string } | null = null;
+
+/** True while a background sign-in is waiting for the user. */
+export function loginInProgress(): boolean {
+  return loginInFlight !== null;
+}
+
+export function lastBackgroundLogin(): { at: number; message: string } | null {
+  return lastLoginResult;
+}
+
+/**
+ * Start a sign-in without waiting for it, for remote setups: a tool call
+ * cannot stay open the ten minutes a captcha and an emailed code can take.
+ * A second call while one is open reuses it.
+ */
+export function startBackgroundLogin(opts: BrowserLoginOptions = {}): { started: boolean } {
+  if (loginInFlight) return { started: false };
+  loginInFlight = browserLogin(opts)
+    .then((message) => {
+      lastLoginResult = { at: Date.now(), message };
+      return message;
+    })
+    .catch((error) => {
+      const message = `Browser login failed: ${(error as Error).message}`;
+      lastLoginResult = { at: Date.now(), message };
+      logger.error('Background login failed', { error: String(error) });
+      return message;
+    })
+    .finally(() => {
+      loginInFlight = null;
+    });
+  return { started: true };
+}
+
+/**
  * Sign in through a browser window the user drives themselves.
  *
  * Two constraints shape this:
@@ -100,17 +169,7 @@ export async function browserLogin(opts: BrowserLoginOptions = {}): Promise<stri
   const dir = mkdtempSync(join(tmpdir(), 'carrefour-login-'));
   const waitMs = opts.waitMs ?? 900_000;
 
-  const child = spawn(
-    executable,
-    [
-      `--user-data-dir=${dir}`,
-      `--remote-debugging-port=${port}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      LOGIN_URL,
-    ],
-    { stdio: 'ignore', detached: true }
-  );
+  const child = spawn(executable, loginBrowserArgs(dir, port), { stdio: 'ignore', detached: true });
   child.unref();
 
   let signedIn = false;

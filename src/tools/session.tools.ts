@@ -9,7 +9,14 @@ import {
 } from '../services/session.service.js';
 import { httpService } from '../services/http.service.js';
 import { refreshSession, ssoStatus } from '../services/auth.service.js';
-import { browserLogin, isPlaywrightAvailable } from '../services/browser-login.js';
+import {
+  browserLogin,
+  isPlaywrightAvailable,
+  remoteLoginUrl,
+  startBackgroundLogin,
+  loginInProgress,
+  lastBackgroundLogin,
+} from '../services/browser-login.js';
 import { browserService } from '../services/browser.service.js';
 
 function humanDuration(seconds: number): string {
@@ -62,10 +69,22 @@ export function registerSessionTools(server: McpServer): void {
     },
     async ({ verify }) => {
       const status = sessionService.status();
-      if (!status.authenticated && !status.sso) return text(NO_SESSION_MESSAGE, true);
+      const pendingLogin = loginInProgress()
+        ? `Sign-in in progress: finish it in the window at ${remoteLoginUrl() ?? 'the server screen'}.\n`
+        : '';
+      const last = lastBackgroundLogin();
+      const lastLine =
+        last && !loginInProgress()
+          ? `Last remote sign-in (${new Date(last.at).toISOString()}): ${last.message}\n`
+          : '';
+      if (!status.authenticated && !status.sso) {
+        return text(`${pendingLogin}${lastLine}${NO_SESSION_MESSAGE}`, !pendingLogin);
+      }
 
       const browser = browserService.describe();
       let line =
+        pendingLogin +
+        lastLine +
         `Session present: ${status.cookieCount} cookie(s) [${status.cookies.join(', ')}]\n` +
         `File: ${status.sessionFile}\nBrowser profile: ${browser.profile} (${browser.running ? 'running' : 'stopped'})`;
 
@@ -129,6 +148,24 @@ export function registerSessionTools(server: McpServer): void {
         'The login cannot be automated: Cloudflare Turnstile refuses to validate in a driven browser.',
       {},
       async () => {
+        const remote = remoteLoginUrl();
+        if (remote) {
+          const { started } = startBackgroundLogin({});
+          return text(
+            `${started ? 'A sign-in window is open' : 'A sign-in window is already open'} on the server's ` +
+              `screen. Open ${remote} in a browser (a phone works), complete the captcha and the code ` +
+              'Carrefour emails you, and wait until the page shows the carrefour.fr storefront. Do not ' +
+              'close that window. Then check with carrefour_session_status. The window waits 15 minutes.'
+          );
+        }
+        if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+          return text(
+            'This server has no screen to open a sign-in window on. Either run it with the remote ' +
+              'sign-in screen (see DEPLOY.md: Xvfb + noVNC, CARREFOUR_REMOTE_LOGIN_URL), or sign in on a ' +
+              'desktop install and import the session with carrefour_set_cookies.',
+            true
+          );
+        }
         try {
           return text(await browserLogin({}));
         } catch (error) {
