@@ -1,0 +1,22 @@
+# Carrefour Drive MCP on a home server (Synology Container Manager, any Docker host).
+# Copy .env.docker.example to .env next to this file and fill it in first.
+# Full guide: DEPLOY.md
+
+services:
+  carrefour-mcp:
+    image: ghcr.io/manub3/carrefourdrivemcp:latest
+    # Or build it yourself from a checkout:
+    # build: .
+    container_name: carrefour-mcp
+    restart: unless-stopped
+    env_file: .env
+    # Chromium needs more shared memory than Docker's 64 MB default.
+    shm_size: "1gb"
+    ports:
+      # MCP endpoint (OAuth-protected). Point the tunnel's public hostname here.
+      - "8787:8787"
+      # Remote sign-in screen (noVNC). Point a second hostname here, behind Cloudflare Access.
+      - "6080:6080"
+    volumes:
+      # Session cookies, browser profile, OAuth clients and token hashes, logs.
+      - ./data:/data
