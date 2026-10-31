@@ -45,6 +45,21 @@ const DEFAULT_REDIRECT_HOSTS = ['claude.ai', 'claude.com', 'localhost', '127.0.0
 
 export const SCOPE = 'carrefour';
 
+/**
+ * CSP of the consent page. Browsers apply `form-action` to the redirects that
+ * follow a form submission too, so the client's redirect origin must be listed
+ * next to 'self', or the browser stops on the way back to Claude.
+ */
+export function consentPageCsp(redirectUri?: string): string {
+  let target = '';
+  try {
+    if (redirectUri) target = ` ${new URL(redirectUri).origin}`;
+  } catch {
+    target = '';
+  }
+  return `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${target}`;
+}
+
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -194,7 +209,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     const id = randomBytes(24).toString('base64url');
     this.pending.set(id, { client, params, createdAt: Date.now() });
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', consentPageCsp(params.redirectUri));
     res.setHeader('X-Frame-Options', 'DENY');
     res.status(200).type('html').send(loginPage({ requestId: id, clientName: client.client_name }));
   }
@@ -212,7 +227,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   completeLogin(
     requestId: string,
     password: string
-  ): { redirect: string } | { page: string; status: number } {
+  ): { redirect: string } | { page: string; status: number; redirectUri?: string } {
     this.prune();
     const pending = this.pending.get(requestId);
     if (!pending) {
@@ -224,6 +239,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     if (this.lockedOut()) {
       return {
         status: 429,
+        redirectUri: pending.params.redirectUri,
         page: loginPage({ requestId, clientName: pending.client.client_name, error: 'Too many attempts. Try again in 15 minutes.' }),
       };
     }
@@ -232,6 +248,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       logger.info('OAuth login refused: wrong password', { attempts: this.failures.length });
       return {
         status: 401,
+        redirectUri: pending.params.redirectUri,
         page: loginPage({ requestId, clientName: pending.client.client_name, error: 'Wrong password.' }),
       };
     }

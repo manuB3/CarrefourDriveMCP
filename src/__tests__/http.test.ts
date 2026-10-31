@@ -184,11 +184,15 @@ test('full flow: password page, code, token, then MCP calls', async () => {
   const page = await authorizePage(client.client_id, challenge, 'state-123');
   assert.equal(page.res.status, 200);
   assert.match(page.html, /Server password/);
-  assert.match(page.res.headers.get('content-security-policy') ?? '', /default-src 'none'/);
+  const csp = page.res.headers.get('content-security-policy') ?? '';
+  assert.match(csp, /default-src 'none'/);
+  // Browsers apply form-action to the redirect after submit: Claude's origin must be allowed.
+  assert.match(csp, /form-action 'self' https:\/\/claude\.ai(;|$)/);
   assert.ok(page.requestId);
 
   const wrong = await login(page.requestId!, 'not the password');
   assert.equal(wrong.status, 401);
+  assert.match(wrong.headers.get('content-security-policy') ?? '', /form-action 'self' https:\/\/claude\.ai/);
   assert.match(await wrong.text(), /Wrong password/);
 
   const ok = await login(page.requestId!, PASSWORD);

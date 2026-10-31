@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { createServer } from '../server.js';
-import { SingleUserOAuthProvider, SCOPE } from './oauth.js';
+import { SingleUserOAuthProvider, SCOPE, consentPageCsp } from './oauth.js';
 import { dataPath } from '../utils/paths.js';
 import { logger } from '../utils/logger.js';
 
@@ -100,7 +100,7 @@ export function createHttpApp(config: HttpConfig): { app: Express; provider: Sin
       res.redirect(302, outcome.redirect);
       return;
     }
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', consentPageCsp(outcome.redirectUri));
     res.setHeader('X-Frame-Options', 'DENY');
     res.status(outcome.status).type('html').send(outcome.page);
   });
