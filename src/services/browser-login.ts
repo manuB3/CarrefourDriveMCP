@@ -1,5 +1,5 @@
 import { createRequire } from 'module';
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { createServer } from 'net';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -66,6 +66,42 @@ function loggedIn(tabs: Array<{ type: string; url: string }>): boolean {
       return false;
     }
   });
+}
+
+/**
+ * Stop the sign-in browser and wait for it to exit: Chromium keeps writing to
+ * its profile while it shuts down, so deleting the profile right after the
+ * signal races with it (ENOTEMPTY on Linux).
+ */
+export async function stopBrowser(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  const signal = (sig: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid!, sig);
+    } catch {
+      try {
+        child.kill(sig);
+      } catch {
+        // already gone
+      }
+    }
+  };
+  signal('SIGTERM');
+  const timeout = (ms: number) => new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), ms));
+  if ((await Promise.race([exited.then(() => 'exited' as const), timeout(5000)])) === 'timeout') {
+    signal('SIGKILL');
+    await Promise.race([exited, timeout(2000)]);
+  }
+}
+
+/** Best effort: a leftover temp profile must never turn a successful sign-in into a failure. */
+export function removeProfile(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (error) {
+    logger.error('Could not remove the temporary sign-in profile', { dir, error: String(error) });
+  }
 }
 
 /**
@@ -208,12 +244,8 @@ export async function browserLogin(opts: BrowserLoginOptions = {}): Promise<stri
       await browser.close().catch(() => undefined);
     }
   } finally {
-    try {
-      process.kill(-child.pid!, 'SIGTERM');
-    } catch {
-      child.kill('SIGTERM');
-    }
-    rmSync(dir, { recursive: true, force: true });
+    await stopBrowser(child);
+    removeProfile(dir);
   }
 
   if (!sessionService.hasSso()) {
