@@ -1,5 +1,6 @@
-import { mkdirSync } from 'fs';
-import { resolve } from 'path';
+import { mkdirSync, readlinkSync, rmSync } from 'fs';
+import { hostname } from 'os';
+import { join, resolve } from 'path';
 import type { BrowserContext, Page } from 'playwright';
 import { sessionService } from './session.service.js';
 import { logger } from '../utils/logger.js';
@@ -47,6 +48,50 @@ function parkingUrl(origin: string): string {
   return `${origin}${PARKING_PATH[origin] ?? '/'}`;
 }
 
+const SINGLETON_FILES = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Remove a profile lock left behind by a Chromium that is gone.
+ *
+ * Chromium marks a profile in use with a `SingletonLock` symlink pointing at
+ * "<hostname>-<pid>". When the profile lives on a volume that outlives the
+ * container (Docker), a recreated container gets a new hostname and Chromium
+ * refuses the profile as "in use by another computer". The lock is stale when
+ * it names another host, or a process that no longer exists on this one.
+ * Returns true when a stale lock was removed.
+ */
+export function clearStaleProfileLock(dir: string, host: string = hostname()): boolean {
+  let target: string;
+  try {
+    target = readlinkSync(join(dir, 'SingletonLock'));
+  } catch {
+    return false; // no lock
+  }
+  const dash = target.lastIndexOf('-');
+  const lockHost = dash > 0 ? target.slice(0, dash) : target;
+  const pid = dash > 0 ? Number(target.slice(dash + 1)) : NaN;
+  const stale = lockHost !== host || !Number.isInteger(pid) || !processAlive(pid);
+  if (!stale) return false;
+  for (const name of SINGLETON_FILES) {
+    try {
+      rmSync(join(dir, name), { force: true });
+    } catch {
+      // best effort
+    }
+  }
+  logger.info('Removed a stale browser profile lock', { dir, lock: target });
+  return true;
+}
+
 export function profileDir(): string {
   return process.env.CARREFOUR_BROWSER_PROFILE
     ? resolve(process.env.CARREFOUR_BROWSER_PROFILE)
@@ -85,6 +130,8 @@ class BrowserService {
   private async launch(headless: boolean): Promise<BrowserContext> {
     const dir = profileDir();
     mkdirSync(dir, { recursive: true });
+    // This process holds no context here, so any lock is someone else's.
+    clearStaleProfileLock(dir);
 
     // Imported at call time so the module graph stays loadable without playwright.
     const { chromium } = await import('playwright');
