@@ -20,7 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify tini \
  && rm -rf /var/lib/apt/lists/* \
- && printf '<!doctype html><meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;resize=scale">\n' \
+ && printf '<!doctype html><meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=true&amp;resize=scale&amp;reconnect=true&amp;reconnect_delay=1000">\n' \
     > /usr/share/novnc/index.html
 
 WORKDIR /app
