@@ -31,7 +31,6 @@ jobs:
             -e MCP_PUBLIC_URL=http://localhost:8787 \
             -e MCP_AUTH_PASSWORD=ci-password-not-secret \
             -e MCP_AUTH_TOKEN=ci-static-token-0123456789abcdef0123456789 \
-            -e VNC_PASSWORD=civnc123 \
             carrefour-mcp:test
           for i in $(seq 1 60); do
             curl -fsS http://localhost:8787/healthz && break
@@ -58,24 +57,32 @@ jobs:
           if grep -q '"submit_checkout_payment"' tools.json; then echo 'checkout exposed'; exit 1; fi
           curl -fsS http://localhost:8787/.well-known/oauth-authorization-server | grep -q registration_endpoint
 
-      - name: Remote sign-in screen
+      - name: Remote sign-in screen and shared browser
         run: |
           curl -fsS http://localhost:6080/vnc.html | grep -qi novnc
+          curl -fsS http://localhost:6080/ | grep -q 'reconnect=true'
           T=ci-static-token-0123456789abcdef0123456789
-          curl -fsS http://localhost:8787/mcp \
-            -H "authorization: Bearer $T" -H 'content-type: application/json' \
-            -H 'accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"carrefour_browser_login","arguments":{}}}' | tee login.json
+          mcp() {
+            curl -fsS http://localhost:8787/mcp \
+              -H "authorization: Bearer $T" -H 'content-type: application/json' \
+              -H 'accept: application/json, text/event-stream' -d "$1"
+          }
+          mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"carrefour_browser_login","arguments":{}}}' | tee login.json
           grep -q 'sign-in window is open' login.json
-          # Chromium must be up on the virtual screen.
+          grep -q 'reconnect=true' login.json
+          # One plain Chromium on the persistent profile, nothing automated.
           for i in $(seq 1 30); do
-            docker exec cm pgrep -f remote-debugging-port >/dev/null && break
+            docker exec cm pgrep -f 'remote-debugging-port=9333' >/dev/null && break
             sleep 1
           done
-          docker exec cm pgrep -fa remote-debugging-port | head -1
-          port=$(docker exec cm pgrep -fa remote-debugging-port | grep -o 'remote-debugging-port=[0-9]*' | head -1 | cut -d= -f2)
+          docker exec cm pgrep -fa 'user-data-dir=/data/browser-profile' | grep -v -- '--type=' | tee procs.txt
+          test "$(wc -l < procs.txt)" -eq 1
+          if grep -q -- '--headless\|enable-automation' procs.txt; then echo 'browser looks automated'; exit 1; fi
           sleep 5
-          docker exec cm node -e "fetch('http://127.0.0.1:$port/json/list').then(r=>r.json()).then(t=>console.log('tabs:', t.filter(x=>x.type==='page').map(x=>x.url).join(' ')))"
+          docker exec cm node -e "fetch('http://127.0.0.1:9333/json/list').then(r=>r.json()).then(t=>console.log('tabs:', t.filter(x=>x.type==='page').map(x=>x.url).join(' ')))"
+          # While the user signs in, requests are held off the browser.
+          mcp '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_products","arguments":{"q":"lait"}}}' | tee search.json
+          grep -q 'sign-in is in progress' search.json
 
       - name: Container logs
         if: always()

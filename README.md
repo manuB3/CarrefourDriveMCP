@@ -474,7 +474,11 @@ same private endpoints the website uses, with your own session.
 **Is my password stored?** No. You type it in a browser window; only cookies are
 persisted, in `~/.carrefour-drive-mcp/sessions/cookies.json` with `0600`
 permissions. No credential
-lives in this repo, and `data/` and `.env` are gitignored.
+lives in this repo, and `data/` and `.env` are gitignored. Exception: with the
+Docker image, the sign-in browser keeps a persistent profile, so if you let
+Chromium save your password, it is stored in that profile (in the data volume,
+with Chromium's basic encryption since there is no system keyring). Don't save
+it if anyone else can read that volume.
 
 **Can it place a real order?** Only if you set `CARREFOUR_ENABLE_CHECKOUT=1`.
 Then `submit_checkout_payment` charges a real payment: treat it accordingly.

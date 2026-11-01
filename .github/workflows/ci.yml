@@ -24,6 +24,12 @@ jobs:
       # and the smoke test do not need (they never reach carrefour.fr).
       - run: npm ci --ignore-scripts
       - run: npm run verify
+      - name: Shared browser end-to-end (real Chromium)
+        if: runner.os == 'Linux'
+        run: |
+          npx playwright install --with-deps chromium
+          CARREFOUR_TEST_CHROMIUM="$(node -p "require('playwright').chromium.executablePath()")" \
+            node --test dist/__tests__/shared-browser.e2e.test.js
       - name: Smoke test with checkout enabled
         run: node scripts/smoke.mjs
         env:
