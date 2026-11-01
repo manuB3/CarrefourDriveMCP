@@ -1,7 +1,8 @@
 import { mkdirSync, readlinkSync, rmSync } from 'fs';
 import { hostname } from 'os';
 import { join, resolve } from 'path';
-import type { BrowserContext, Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
+import { SharedBrowser, sharedBrowserEnabled, sharedBrowserPort } from './shared-browser.js';
 import { sessionService } from './session.service.js';
 import { logger } from '../utils/logger.js';
 import { dataPath } from '../utils/paths.js';
@@ -122,12 +123,88 @@ class BrowserService {
   private starting: Promise<BrowserContext> | null = null;
   /** One parked page per origin: an in-page fetch is subject to CORS. */
   private pages = new Map<string, Page>();
+  /** Shared mode: the visible browser, and our CDP connection to it. */
+  private shared: SharedBrowser | null = null;
+  private cdp: Browser | null = null;
+  /** Set while the user signs in: nothing may attach to the browser then. */
+  private pausedFor: string | null = null;
 
   isRunning(): boolean {
     return this.context !== null;
   }
 
+  /** One visible browser for sign-in and requests (see shared-browser.ts). */
+  isShared(): boolean {
+    return sharedBrowserEnabled();
+  }
+
+  async sharedBrowser(): Promise<SharedBrowser> {
+    if (!this.shared) {
+      const { chromium } = await import('playwright');
+      this.shared = new SharedBrowser({
+        executable: process.env.CARREFOUR_CHROMIUM_PATH || chromium.executablePath(),
+        profileDir: profileDir(),
+        port: sharedBrowserPort(),
+        windowSize: process.env.CARREFOUR_LOGIN_WINDOW_SIZE || '1280x900',
+        noSandbox: ['1', 'true', 'yes'].includes((process.env.CARREFOUR_CHROMIUM_NO_SANDBOX ?? '').toLowerCase()),
+        headless: ['1', 'true', 'yes'].includes((process.env.CARREFOUR_SHARED_BROWSER_HEADLESS ?? '').toLowerCase()),
+        startUrl: process.env.CARREFOUR_SHARED_START_URL || 'https://www.carrefour.fr/',
+      });
+    }
+    return this.shared;
+  }
+
+  /** Keep requests off the browser while the user signs in (Turnstile). */
+  async pause(reason: string): Promise<void> {
+    this.pausedFor = reason;
+    await this.close();
+  }
+
+  resume(): void {
+    this.pausedFor = null;
+  }
+
+  pausedReason(): string | null {
+    return this.pausedFor;
+  }
+
+  private async connectShared(): Promise<BrowserContext> {
+    const { chromium } = await import('playwright');
+    const shared = await this.sharedBrowser();
+    if (!(await shared.alive())) clearStaleProfileLock(profileDir());
+    const started = await shared.ensureRunning();
+
+    const browser = await chromium.connectOverCDP(shared.endpoint);
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    context.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
+    browser.on('disconnected', () => {
+      if (this.cdp === browser) {
+        this.cdp = null;
+        this.context = null;
+        this.pages.clear();
+      }
+    });
+    this.cdp = browser;
+
+    // A browser that just started lost its session cookies (they are never
+    // written to disk): give it back the ones we kept. Same profile, same
+    // device, so Carrefour accepts them, unlike a copy into another browser.
+    if (started) {
+      const seeded = sessionService.toPlaywrightCookies();
+      if (seeded.length > 0) {
+        await context.addCookies(seeded).catch((error) => {
+          logger.error('Could not seed the shared browser with the stored cookies', { error: String(error) });
+        });
+      }
+    }
+
+    this.headed = true;
+    logger.info('Attached to the shared browser', { started, endpoint: shared.endpoint });
+    return context;
+  }
+
   private async launch(headless: boolean): Promise<BrowserContext> {
+    if (this.isShared()) return this.connectShared();
     const dir = profileDir();
     mkdirSync(dir, { recursive: true });
     // This process holds no context here, so any lock is someone else's.
@@ -163,6 +240,7 @@ class BrowserService {
 
   /** The persistent profile can only be opened once, so launches are serialised. */
   private async ensureContext(): Promise<BrowserContext> {
+    if (this.pausedFor) throw new Error(this.pausedFor);
     if (this.context) return this.context;
     if (!this.starting) {
       this.starting = this.launch(true)
@@ -185,7 +263,18 @@ class BrowserService {
    * A page parked on `origin`, so that a fetch from it is same-origin.
    * Re-navigates when the site moved the page from under us.
    */
-  private async pageFor(origin: string): Promise<Page> {
+  private parking = new Map<string, Promise<Page>>();
+
+  /** Concurrent callers for one origin share one parked page. */
+  private pageFor(origin: string): Promise<Page> {
+    const pending = this.parking.get(origin);
+    if (pending) return pending;
+    const p = this.parkPage(origin).finally(() => this.parking.delete(origin));
+    this.parking.set(origin, p);
+    return p;
+  }
+
+  private async parkPage(origin: string): Promise<Page> {
     const context = await this.ensureContext();
     const existing = this.pages.get(origin);
     if (existing && !existing.isClosed()) {
@@ -194,7 +283,10 @@ class BrowserService {
       return existing;
     }
 
-    const page = context.pages().find((p) => !p.isClosed() && !this.isParked(p)) ?? (await context.newPage());
+    // In shared mode the other tabs are the user's: never take one over.
+    const page = this.isShared()
+      ? await context.newPage()
+      : (context.pages().find((p) => !p.isClosed() && !this.isParked(p)) ?? (await context.newPage()));
     // A 404 is fine: all we need from the navigation is the origin.
     await page.goto(parkingUrl(origin), { waitUntil: 'domcontentloaded' }).catch((error) => {
       logger.error('Could not park a page on the origin', { origin, error: String(error) });
@@ -288,15 +380,38 @@ class BrowserService {
     }
   }
 
+  /**
+   * Release the browser. In shared mode this closes our parked tabs and
+   * disconnects, leaving the browser and the user's tabs running.
+   */
   async close(): Promise<void> {
     const context = this.context;
+    const parked = [...this.pages.values()];
     this.context = null;
     this.pages.clear();
+    if (this.cdp) {
+      const cdp = this.cdp;
+      this.cdp = null;
+      for (const page of parked) await page.close().catch(() => undefined);
+      await cdp.close().catch(() => undefined);
+      return;
+    }
     if (context) await context.close().catch(() => undefined);
   }
 
-  describe(): { running: boolean; headed: boolean; profile: string } {
-    return { running: this.context !== null, headed: this.headed, profile: profileDir() };
+  /** Process shutdown: also stop the shared browser we started. */
+  async shutdown(): Promise<void> {
+    await this.close();
+    await this.shared?.stop();
+  }
+
+  describe(): { running: boolean; headed: boolean; profile: string; mode: 'shared' | 'headless' } {
+    return {
+      running: this.context !== null,
+      headed: this.headed,
+      profile: profileDir(),
+      mode: this.isShared() ? 'shared' : 'headless',
+    };
   }
 }
 

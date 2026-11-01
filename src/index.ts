@@ -34,7 +34,7 @@ async function main(): Promise<void> {
   // The browser is a child process; leaving it behind would lock the profile.
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
-      browserService.close().finally(() => process.exit(0));
+      browserService.shutdown().finally(() => process.exit(0));
     });
   }
 }

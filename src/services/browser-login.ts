@@ -4,8 +4,8 @@ import { createServer } from 'net';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { sessionService, SSO_COOKIE_NAME, CARREFOUR_ORIGIN } from './session.service.js';
-import { browserService } from './browser.service.js';
+import { sessionService, SSO_COOKIE_NAME, CARREFOUR_ORIGIN, IAM_ORIGIN } from './session.service.js';
+import { browserService, clearStaleProfileLock, profileDir } from './browser.service.js';
 import { logger } from '../utils/logger.js';
 
 const require = createRequire(import.meta.url);
@@ -134,7 +134,34 @@ export function loginBrowserArgs(dir: string, port: number, env: NodeJS.ProcessE
  * (the noVNC page of the container). Unset on a desktop install.
  */
 export function remoteLoginUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return env.CARREFOUR_REMOTE_LOGIN_URL?.trim() || undefined;
+  const raw = env.CARREFOUR_REMOTE_LOGIN_URL?.trim();
+  if (!raw) return undefined;
+  return withViewerDefaults(raw);
+}
+
+/**
+ * On a phone, switching to the mail app suspends the tab and drops the noVNC
+ * connection. Make the viewer connect on open and reconnect by itself, unless
+ * the configured link already says otherwise.
+ */
+export function withViewerDefaults(link: string): string {
+  let url: URL;
+  try {
+    url = new URL(link);
+  } catch {
+    return link;
+  }
+  if (!/vnc(_lite)?\.html$/.test(url.pathname)) return link;
+  const defaults: Record<string, string> = {
+    autoconnect: 'true',
+    resize: 'scale',
+    reconnect: 'true',
+    reconnect_delay: '1000',
+  };
+  for (const [key, value] of Object.entries(defaults)) {
+    if (!url.searchParams.has(key)) url.searchParams.set(key, value);
+  }
+  return url.toString();
 }
 
 let loginInFlight: Promise<string> | null = null;
@@ -173,6 +200,108 @@ export function startBackgroundLogin(opts: BrowserLoginOptions = {}): { started:
   return { started: true };
 }
 
+export interface LoginWatchState {
+  seenIam: boolean;
+  storefrontSince?: number;
+}
+
+/** How long a tab may sit on the storefront without visiting the IAM before we call it signed in. */
+const ALREADY_SIGNED_IN_MS = 8000;
+
+/**
+ * Decide, from successive URLs of the sign-in tab, when the sign-in is over.
+ *
+ * In shared mode other tabs of the same browser may already show the
+ * storefront, so only the sign-in tab counts, and it must have gone through
+ * the IAM (moncompte.carrefour.fr) and come back. A tab that lands on the
+ * storefront without ever reaching the IAM means the user was already signed
+ * in; it is accepted once it has stayed there a few seconds.
+ */
+export function loginTabDone(url: string, state: LoginWatchState, now: number = Date.now()): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.origin === IAM_ORIGIN) {
+    state.seenIam = true;
+    state.storefrontSince = undefined;
+    return false;
+  }
+  if (parsed.origin === CARREFOUR_ORIGIN && !parsed.pathname.startsWith('/mon-compte/login')) {
+    if (state.seenIam) return true;
+    state.storefrontSince ??= now;
+    return now - state.storefrontSince >= ALREADY_SIGNED_IN_MS;
+  }
+  state.storefrontSince = undefined;
+  return false;
+}
+
+const PAUSE_MESSAGE =
+  'A Carrefour sign-in is in progress in the browser. Finish it on the sign-in screen ' +
+  '(captcha and emailed code), then try again.';
+
+/**
+ * Shared mode: sign in inside the one visible browser the server also uses.
+ * Nothing is attached to the browser while the user signs in; once the tab is
+ * back on the storefront, the server attaches and keeps the session where it
+ * was created.
+ */
+async function sharedLogin(waitMs: number): Promise<string> {
+  const shared = await browserService.sharedBrowser();
+  await browserService.pause(PAUSE_MESSAGE);
+  let signedIn = false;
+  let closed = false;
+  try {
+    if (!(await shared.alive())) clearStaleProfileLock(profileDir());
+    await shared.ensureRunning();
+    const tab = await shared.openTab(LOGIN_URL);
+    await shared.activate(tab.id);
+    const state: LoginWatchState = { seenIam: false };
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      let tabs;
+      try {
+        tabs = await shared.tabs();
+      } catch {
+        continue; // browser busy or restarting
+      }
+      const current = tabs.find((t) => t.id === tab.id);
+      if (!current) {
+        closed = true;
+        break;
+      }
+      if (loginTabDone(current.url, state)) {
+        signedIn = true;
+        break;
+      }
+    }
+  } finally {
+    browserService.resume();
+  }
+
+  if (closed) return 'The sign-in tab was closed before the sign-in finished. Run carrefour_browser_login again.';
+  if (!signedIn) {
+    return 'The sign-in did not complete in time: the tab never came back to the carrefour.fr storefront. Run carrefour_browser_login again.';
+  }
+
+  // Let the last redirects set their cookies, then attach and keep a copy.
+  await sleep(1500);
+  await browserService.syncCookies();
+  if (!sessionService.hasSso()) {
+    return (
+      `Signed in, but no '${SSO_COOKIE_NAME}' cookie is visible, so the session may not renew itself. ` +
+      'Authenticated tools will work until it expires.'
+    );
+  }
+  return (
+    'Signed in. The session lives in the server browser and renews itself for up to 24 h. ' +
+    'Leave the carrefour.fr tab open; the browser remembers the saved password for next time.'
+  );
+}
+
 /**
  * Sign in through a browser window the user drives themselves.
  *
@@ -192,6 +321,7 @@ export function startBackgroundLogin(opts: BrowserLoginOptions = {}): { started:
  * every launch.
  */
 export async function browserLogin(opts: BrowserLoginOptions = {}): Promise<string> {
+  if (browserService.isShared()) return sharedLogin(opts.waitMs ?? 900_000);
   if (!isPlaywrightAvailable()) {
     throw new Error(
       'Playwright is not installed. Run `npm install playwright && npx playwright install chromium`.'
