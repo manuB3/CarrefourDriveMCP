@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loginTabDone, withViewerDefaults, remoteLoginUrl, type LoginWatchState } from '../services/browser-login.js';
+import {
+  loginTabDone,
+  withViewerDefaults,
+  remoteLoginUrl,
+  isLoginTab,
+  CARREFOUR_COOKIE_DOMAIN,
+  type LoginWatchState,
+} from '../services/browser-login.js';
 import { sharedBrowserArgs, sharedBrowserEnabled } from '../services/shared-browser.js';
 
 const LOGIN = 'https://www.carrefour.fr/mon-compte/login';
@@ -30,6 +37,25 @@ test('already signed in: the tab settles on the storefront without the IAM', () 
   assert.equal(loginTabDone('https://www.carrefour.fr/mon-compte', s, 0), false);
   assert.equal(loginTabDone('https://www.carrefour.fr/mon-compte', s, 5000), false);
   assert.equal(loginTabDone('https://www.carrefour.fr/mon-compte', s, 8000), true);
+});
+
+test('tabs left on the sign-in flow are recognised, other tabs are not', () => {
+  assert.equal(isLoginTab(IAM), true);
+  assert.equal(isLoginTab(LOGIN), true);
+  assert.equal(isLoginTab('https://moncompte.carrefour.fr/iam/oauth2/CarrefourConnect/authorize?x=1'), true);
+  assert.equal(isLoginTab(HOME), false);
+  assert.equal(isLoginTab('https://www.carrefour.fr/mon-compte/mes-achats'), false);
+  assert.equal(isLoginTab('about:blank'), false);
+  assert.equal(isLoginTab('not a url'), false);
+});
+
+test('only Carrefour cookie domains are cleared', () => {
+  for (const d of ['.carrefour.fr', 'carrefour.fr', 'www.carrefour.fr', 'moncompte.carrefour.fr']) {
+    assert.match(d, CARREFOUR_COOKIE_DOMAIN);
+  }
+  for (const d of ['.google.com', 'notcarrefour.fr', 'carrefour.fr.evil.com', '.cloudflare.com']) {
+    assert.doesNotMatch(d, CARREFOUR_COOKIE_DOMAIN);
+  }
 });
 
 test('garbage URLs are ignored', () => {

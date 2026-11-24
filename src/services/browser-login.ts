@@ -6,6 +6,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { sessionService, SSO_COOKIE_NAME, CARREFOUR_ORIGIN, IAM_ORIGIN } from './session.service.js';
 import { browserService, clearStaleProfileLock, profileDir } from './browser.service.js';
+import type { SharedBrowser } from './shared-browser.js';
 import { logger } from '../utils/logger.js';
 
 const require = createRequire(import.meta.url);
@@ -238,6 +239,59 @@ export function loginTabDone(url: string, state: LoginWatchState, now: number = 
   return false;
 }
 
+/** A tab left on the sign-in flow (IAM page or the storefront's login entry). */
+export function isLoginTab(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.origin === IAM_ORIGIN) return true;
+  return parsed.origin === CARREFOUR_ORIGIN && parsed.pathname.startsWith('/mon-compte/login');
+}
+
+/** Cookie domains of Carrefour (www, moncompte and the parent domain). */
+export const CARREFOUR_COOKIE_DOMAIN = /(^|\.)carrefour\.fr$/;
+
+/**
+ * Start every sign-in from a clean slate.
+ *
+ * An expired `c4iamsecuretk` left in the browser makes the IAM page try a
+ * silent re-login, which fails with `invalid_grant` and leaves the page on its
+ * blue panel without ever showing the form. Tabs from earlier attempts pile up
+ * for the same reason. So: close them, drop the Carrefour cookies of the
+ * browser and of the jar. This runs before the sign-in tab opens, and the CDP
+ * connection is released right away, so Turnstile still sees a plain browser.
+ * Saved passwords live outside the cookies and are kept.
+ */
+async function resetSignInState(shared: SharedBrowser): Promise<void> {
+  try {
+    for (const tab of await shared.tabs()) {
+      if (isLoginTab(tab.url)) await shared.closeTab(tab.id);
+    }
+  } catch (error) {
+    logger.error('Could not close the previous sign-in tabs', { error: String(error) });
+  }
+
+  try {
+    const { chromium } = await import('playwright');
+    const browser = await chromium.connectOverCDP(shared.endpoint);
+    try {
+      for (const context of browser.contexts()) {
+        await context.clearCookies({ domain: CARREFOUR_COOKIE_DOMAIN });
+      }
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+  } catch (error) {
+    logger.error('Could not clear the Carrefour cookies of the browser', { error: String(error) });
+  }
+
+  sessionService.clear();
+  logger.info('Sign-in state reset: old tabs closed, Carrefour cookies cleared');
+}
+
 const PAUSE_MESSAGE =
   'A Carrefour sign-in is in progress in the browser. Finish it on the sign-in screen ' +
   '(captcha and emailed code), then try again.';
@@ -256,6 +310,7 @@ async function sharedLogin(waitMs: number): Promise<string> {
   try {
     if (!(await shared.alive())) clearStaleProfileLock(profileDir());
     await shared.ensureRunning();
+    await resetSignInState(shared);
     const tab = await shared.openTab(LOGIN_URL);
     await shared.activate(tab.id);
     const state: LoginWatchState = { seenIam: false };
